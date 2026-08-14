@@ -674,6 +674,7 @@ func (db *DB) init() error {
 	p.SetId(3)
 	p.SetFlags(common.LeafPageFlag)
 	p.SetCount(0)
+	common.SetChecksum(common.UnsafeByteSlice(unsafe.Pointer(p), 0, 0, db.pageSize))
 
 	// Write the buffer to our data file.
 	if _, err := db.ops.writeAt(buf, 0); err != nil {
@@ -925,6 +926,10 @@ func (db *DB) Update(fn func(*Tx) error) error {
 		_ = t.Rollback()
 		return err
 	}
+	if err = t.Err(); err != nil {
+		_ = t.Rollback()
+		return err
+	}
 
 	return t.Commit()
 }
@@ -953,6 +958,10 @@ func (db *DB) View(fn func(*Tx) error) error {
 	err = fn(t)
 	t.managed = false
 	if err != nil {
+		_ = t.Rollback()
+		return err
+	}
+	if err = t.Err(); err != nil {
 		_ = t.Rollback()
 		return err
 	}

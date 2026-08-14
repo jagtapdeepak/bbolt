@@ -312,7 +312,11 @@ func (n *node) spill() error {
 	n.children = nil
 
 	// Split nodes into appropriate sizes. The first node will always be n.
-	var nodes = n.split(uintptr(tx.db.pageSize))
+	splitSize := uintptr(tx.db.pageSize)
+	if tx.pageChecksums() {
+		splitSize -= common.PageChecksumSize
+	}
+	var nodes = n.split(splitSize)
 	for _, node := range nodes {
 		// Add node's page to the freelist if it's not new.
 		if node.pgid > 0 {
@@ -320,8 +324,11 @@ func (n *node) spill() error {
 			node.pgid = 0
 		}
 
-		// Allocate contiguous space for the node.
-		p, err := tx.allocate((node.size() + tx.db.pageSize - 1) / tx.db.pageSize)
+		count := (node.size() + tx.db.pageSize - 1) / tx.db.pageSize
+		if tx.pageChecksums() {
+			count = common.PagesForChecksum(node.size(), tx.db.pageSize)
+		}
+		p, err := tx.allocate(count)
 		if err != nil {
 			return err
 		}

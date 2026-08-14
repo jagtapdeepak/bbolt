@@ -32,6 +32,11 @@ var (
 	// Deprecated: Use the error variables defined in the bbolt/errors package.
 	ErrChecksum = errors.ErrChecksum
 
+	// ErrPageChecksum is returned when a data page's CRC does not match.
+	//
+	// Deprecated: Use the error variables defined in the bbolt/errors package.
+	ErrPageChecksum = errors.ErrPageChecksum
+
 	// ErrTimeout is returned when a database cannot obtain an exclusive lock
 	// on the data file after the timeout passed to Open().
 	//

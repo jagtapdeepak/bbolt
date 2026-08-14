@@ -67,6 +67,175 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestPageChecksum_GetPut(t *testing.T) {
+	db := btesting.MustCreateDBWithOption(t, &bolt.Options{PageSize: pageSize})
+	err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket([]byte("widgets"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("foo"), []byte("bar"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.View(func(tx *bolt.Tx) error {
+		got := tx.Bucket([]byte("widgets")).Get([]byte("foo"))
+		if !bytes.Equal(got, []byte("bar")) {
+			t.Fatalf("got %q", got)
+		}
+		if tx.Err() != nil {
+			t.Fatal(tx.Err())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPageChecksum_GetDetectsBitrot(t *testing.T) {
+	marker := []byte("bitrot-unique-payload-value")
+	db := btesting.MustCreateDBWithOption(t, &bolt.Options{PageSize: pageSize})
+	path := db.Path()
+	err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket([]byte("widgets"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("foo"), marker)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := bytes.Index(buf, marker)
+	if off < 0 {
+		t.Fatal("payload not found in file")
+	}
+	buf[off] ^= 0xff
+	if err := os.WriteFile(path, buf, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rdb, err := bolt.Open(path, 0600, &bolt.Options{PageSize: pageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+
+	err = rdb.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("widgets"))
+		if b == nil {
+			return tx.Err()
+		}
+		_ = b.Get([]byte("foo"))
+		return nil
+	})
+	if err != berrors.ErrPageChecksum {
+		t.Fatalf("got %v want %v", err, berrors.ErrPageChecksum)
+	}
+}
+
+func TestPageChecksum_CorruptTrailer(t *testing.T) {
+	db := btesting.MustCreateDBWithOption(t, &bolt.Options{PageSize: pageSize})
+	path := db.Path()
+	err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket([]byte("widgets"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("foo"), []byte("bar"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for id := 0; id < len(buf)/pageSize; {
+		p := common.LoadPage(buf[id*pageSize : (id+1)*pageSize])
+		span := int(p.Overflow()+1) * pageSize
+		if id*pageSize+span > len(buf) {
+			break
+		}
+		page := buf[id*pageSize : id*pageSize+span]
+		if p.IsLeafPage() && p.Count() > 0 && bytes.Contains(page, []byte("bar")) &&
+			common.VerifyChecksum(page) {
+			page[len(page)-1] ^= 0xff
+			found = true
+			break
+		}
+		id += int(p.Overflow()) + 1
+	}
+	if !found {
+		t.Fatal("no checksummed leaf page")
+	}
+	if err := os.WriteFile(path, buf, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rdb, err := bolt.Open(path, 0600, &bolt.Options{PageSize: pageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+
+	err = rdb.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("widgets"))
+		if b == nil {
+			return tx.Err()
+		}
+		_ = b.Get([]byte("foo"))
+		return nil
+	})
+	if err != berrors.ErrPageChecksum {
+		t.Fatalf("got %v want %v", err, berrors.ErrPageChecksum)
+	}
+}
+
+func TestPageChecksum_PackedPageGrows(t *testing.T) {
+	key := []byte("x")
+	headerAndElem := int(common.PageHeaderSize) + int(common.LeafPageElementSize) + len(key)
+	val := bytes.Repeat([]byte("a"), pageSize-headerAndElem-common.PageChecksumSize+1)
+
+	db := btesting.MustCreateDBWithOption(t, &bolt.Options{PageSize: pageSize})
+	err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket([]byte("widgets"))
+		if err != nil {
+			return err
+		}
+		return b.Put(key, val)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.View(func(tx *bolt.Tx) error {
+		got := tx.Bucket([]byte("widgets")).Get(key)
+		if !bytes.Equal(got, val) {
+			t.Fatalf("got len %d want %d", len(got), len(val))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Regression validation for https://github.com/etcd-io/bbolt/pull/122.
 // Tests multiple goroutines simultaneously opening a database.
 func TestOpen_MultipleGoroutines(t *testing.T) {

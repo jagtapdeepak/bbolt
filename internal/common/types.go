@@ -9,8 +9,11 @@ import (
 // MaxMmapStep is the largest step that can be taken when remapping the mmap.
 const MaxMmapStep = 1 << 30 // 1GB
 
-// Version represents the data file format version.
-const Version uint32 = 2
+// Version2 is the original on-disk format (no page-span CRC).
+const Version2 uint32 = 2
+
+// Version is the current on-disk format (CRC-32 at the end of each page span).
+const Version uint32 = 3
 
 // Magic represents a marker value to indicate that a file is a Bolt DB.
 const Magic uint32 = 0xED0CDAED

@@ -33,6 +33,8 @@ type Tx struct {
 	pages          map[common.Pgid]*common.Page
 	stats          TxStats
 	commitHandlers []func()
+	err            error
+	verified       map[common.Pgid]struct{}
 
 	// WriteFlag specifies the flag for write-related methods like WriteTo().
 	// Tx opens the database file with the specified flag to copy the data.
@@ -56,6 +58,9 @@ func (tx *Tx) init(db *DB) {
 	tx.root = newBucket(tx)
 	tx.root.InBucket = &common.InBucket{}
 	*tx.root.InBucket = *(tx.meta.RootBucket())
+
+	tx.err = nil
+	tx.verified = make(map[common.Pgid]struct{})
 
 	// Increment the transaction id and add a page cache for writable transactions.
 	if tx.writable {
@@ -85,6 +90,18 @@ func (tx *Tx) Size() int64 {
 // Writable returns whether the transaction can perform write operations.
 func (tx *Tx) Writable() bool {
 	return tx.writable
+}
+
+// Err returns a page checksum error encountered while reading pages in this transaction.
+func (tx *Tx) Err() error {
+	if tx == nil {
+		return nil
+	}
+	return tx.err
+}
+
+func (tx *Tx) pageChecksums() bool {
+	return tx.meta != nil && tx.meta.Version() >= common.Version
 }
 
 // Cursor creates a cursor associated with the root bucket.
@@ -285,7 +302,8 @@ func (tx *Tx) Commit() (err error) {
 func (tx *Tx) commitFreelist() error {
 	// Allocate new pages for the new free list. This will overestimate
 	// the size of the freelist but not underestimate the size (which would be bad).
-	p, err := tx.allocate((tx.db.freelist.EstimatedWritePageSize() / tx.db.pageSize) + 1)
+	n := (tx.db.freelist.EstimatedWritePageSize() / tx.db.pageSize) + 1
+	p, err := tx.allocate(n)
 	if err != nil {
 		tx.rollback()
 		return err
@@ -531,6 +549,7 @@ func (tx *Tx) write() error {
 	// Write pages to disk in order.
 	for _, p := range pages {
 		rem := (uint64(p.Overflow()) + 1) * uint64(tx.db.pageSize)
+		tx.stampPageChecksum(p, int(rem))
 		offset := int64(p.Id()) * int64(tx.db.pageSize)
 		var written uintptr
 
@@ -638,7 +657,35 @@ func (tx *Tx) page(id common.Pgid) *common.Page {
 	// Otherwise return directly from the mmap.
 	p := tx.db.page(id)
 	p.FastCheck(id)
+	tx.verifyPageChecksum(p)
 	return p
+}
+
+func (tx *Tx) stampPageChecksum(p *common.Page, n int) {
+	if !tx.pageChecksums() || p.IsMetaPage() || p.IsFreelistPage() {
+		return
+	}
+	buf := common.UnsafeByteSlice(unsafe.Pointer(p), 0, 0, n)
+	common.SetChecksum(buf)
+}
+
+func (tx *Tx) verifyPageChecksum(p *common.Page) {
+	if !tx.pageChecksums() || tx.err != nil {
+		return
+	}
+	if p.IsMetaPage() || p.IsFreelistPage() {
+		return
+	}
+	if _, ok := tx.verified[p.Id()]; ok {
+		return
+	}
+	n := int(p.Overflow()+1) * tx.db.pageSize
+	buf := common.UnsafeByteSlice(unsafe.Pointer(p), 0, 0, n)
+	if !common.VerifyChecksum(buf) {
+		tx.err = berrors.ErrPageChecksum
+		return
+	}
+	tx.verified[p.Id()] = struct{}{}
 }
 
 // forEachPage iterates over every page within a given page and executes a function.

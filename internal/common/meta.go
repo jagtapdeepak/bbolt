@@ -25,7 +25,7 @@ type Meta struct {
 func (m *Meta) Validate() error {
 	if m.magic != Magic {
 		return errors.ErrInvalid
-	} else if m.version != Version {
+	} else if m.version != Version && m.version != Version2 {
 		return errors.ErrVersionMismatch
 	} else if m.checksum != m.Sum64() {
 		return errors.ErrChecksum
