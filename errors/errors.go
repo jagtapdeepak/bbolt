@@ -24,6 +24,9 @@ var (
 	// ErrChecksum is returned when a checksum mismatch occurs on either of the two meta pages.
 	ErrChecksum = errors.New("checksum error")
 
+	// ErrPageChecksum is returned when a data page's CRC does not match.
+	ErrPageChecksum = errors.New("page checksum error")
+
 	// ErrTimeout is returned when a database cannot obtain an exclusive lock
 	// on the data file after the timeout passed to Open().
 	ErrTimeout = errors.New("timeout")

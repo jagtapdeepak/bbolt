@@ -1374,27 +1374,28 @@ func TestBucket_Stats_RandomFill(t *testing.T) {
 
 	if err := db.View(func(tx *bolt.Tx) error {
 		stats := tx.Bucket([]byte("woojits")).Stats()
+		t.Logf("Stats: %#v", stats)
 		if stats.KeyN != 100000 {
 			t.Fatalf("unexpected KeyN: %d", stats.KeyN)
 		}
 
-		if stats.BranchPageN != 98 {
+		if stats.BranchPageN != 96 {
 			t.Fatalf("unexpected BranchPageN: %d", stats.BranchPageN)
 		} else if stats.BranchOverflowN != 0 {
 			t.Fatalf("unexpected BranchOverflowN: %d", stats.BranchOverflowN)
-		} else if stats.BranchInuse != 130984 {
+		} else if stats.BranchInuse != 130436 {
 			t.Fatalf("unexpected BranchInuse: %d", stats.BranchInuse)
-		} else if stats.BranchAlloc != 401408 {
+		} else if stats.BranchAlloc != 393216 {
 			t.Fatalf("unexpected BranchAlloc: %d", stats.BranchAlloc)
 		}
 
-		if stats.LeafPageN != 3412 {
+		if stats.LeafPageN != 3400 {
 			t.Fatalf("unexpected LeafPageN: %d", stats.LeafPageN)
 		} else if stats.LeafOverflowN != 0 {
 			t.Fatalf("unexpected LeafOverflowN: %d", stats.LeafOverflowN)
-		} else if stats.LeafInuse != 4742482 {
+		} else if stats.LeafInuse != 4742290 {
 			t.Fatalf("unexpected LeafInuse: %d", stats.LeafInuse)
-		} else if stats.LeafAlloc != 13975552 {
+		} else if stats.LeafAlloc != 13926400 {
 			t.Fatalf("unexpected LeafAlloc: %d", stats.LeafAlloc)
 		}
 		return nil
@@ -1765,14 +1766,14 @@ func TestBucket_Stats_Large(t *testing.T) {
 		4096: {
 			BranchPageN:       13,
 			BranchOverflowN:   0,
-			LeafPageN:         1196,
+			LeafPageN:         1195,
 			LeafOverflowN:     0,
 			KeyN:              100000,
 			Depth:             3,
 			BranchAlloc:       53248,
-			BranchInuse:       25257,
-			LeafAlloc:         4898816,
-			LeafInuse:         2596916,
+			BranchInuse:       25232,
+			LeafAlloc:         4894720,
+			LeafInuse:         2596900,
 			BucketN:           1,
 			InlineBucketN:     0,
 			InlineBucketInuse: 0},

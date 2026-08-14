@@ -1,10 +1,12 @@
 # Page checksums (Approach A) — staged plan
 
-See [ANALYSIS.md](ANALYSIS.md) for why we chose per-page CRC-64 on Get (not Merkle, not Check-only).
+See [ANALYSIS.md](ANALYSIS.md) for layout (CRC at end of span, not header, not sidecar) and why.
 
-**Goal:** version-3 files store a CRC on every page; `Get` / cursor verify it; `GetWithError` surfaces bit rot. Version-2 files still open without page CRCs.
+**Goal:** new (version 3) databases store a CRC-32 at the end of each **leaf/branch** page span; `Get` verifies it. Header size stays 16 bytes. Meta keeps FNV only. Freelist has no page CRC yet.
 
-**Out of scope:** Merkle parent/child hashes, cryptographic MACs, in-place v2 conversion, changing mmap or two-phase commit.
+**Version 2:** still opens without page CRC. **Upgrade to v3 is handled later by scrub** (rewrite reachable branch/leaf pages + bump meta version). This change does not implement scrub.
+
+**Out of scope here:** Merkle, sidecar, growing the page header, `GetWithError`, compact-as-upgrade, scrub, meta trailing CRC, freelist page CRC.
 
 ```mermaid
 flowchart LR
@@ -20,19 +22,20 @@ flowchart LR
 
 ## Stage 1 — On-disk format and write path
 
-Make new databases write checksummed pages. Do **not** verify on read yet (existing tests should keep passing once `PageHeaderSize` and `init` are consistent).
+Make new databases write checksummed spans. Do **not** verify on read yet.
 
 | Item | Detail |
 |------|--------|
 | Version | Bump `common.Version` to **3**. `Meta.Validate` accepts **2 and 3**. `Open` / `init` write 3. |
-| Header | Add `checksum uint64` after `overflow` on `Page` ([`internal/common/page.go`](internal/common/page.go)). Header 16→24 bytes. Do **not** change `branchPageElement`, `Inode`, or `Meta`. |
-| CRC | CRC-64 ISO (`hash/crc64`) over `(overflow+1)*pageSize` with the checksum field treated as **zero**. Helpers: `ChecksumPage(p, pageSize)`, `SetPageChecksum`. |
-| Write | After `node.write`, `freelist.Write`, and [`DB.init`](db.go) empty pages: set the CRC before `writeAt`. Same for meta pages (page CRC in addition to existing FNV). |
+| Header | **Unchanged.** Do not add fields to `Page`. `PageHeaderSize` remains `unsafe.Sizeof(Page{})` (16). |
+| CRC | CRC-32 Castagnoli (`hash/crc32`) of `[0 : spanLen-4]` (header and payload; not the trailing CRC). Stored in the last 4 bytes of `(overflow+1)*pageSize`. Helpers hash a `[]byte`; they do not parse page type. |
+| Packing | If payload would overlap the last 4 bytes, allocate extra overflow (or leave slack), then stamp CRC. |
+| Write | After `node.write` / [`DB.init`](db.go) empty **leaf**: set the CRC before `writeAt`. **Do not** stamp meta (FNV already) or freelist. |
 | Errors | Add `errors.ErrPageChecksum` now; unused until Stage 2. |
 
-**Done when:** a new DB’s leaf/branch/freelist/meta pages have a matching CRC if inspected by a unit test that hashes the raw page. `go test` (no corruption cases yet) is green.
+**Done when:** a new DB’s leaf/branch spans have a matching trailing CRC. Meta and freelist do not.
 
-**Files:** `internal/common/page.go`, `types.go`, `errors/errors.go`, `node.go`, `db.go` (`init`), freelist `Write` callers / `tx.commitFreelist`.
+**Files:** `internal/common/checksum.go` (or similar), `types.go`, `errors/errors.go`, `node.go` / spill page count, `tx.go` (`write`, `writeMeta`), `db.go` (`init`).
 
 ---
 
@@ -42,14 +45,14 @@ Detect rot on the Get/cursor path.
 
 | Item | Detail |
 |------|--------|
-| Hook | After `FastCheck` in [`Tx.page`](tx.go): if `meta.version >= 3`, recompute CRC; mismatch sets `tx.err` and returns a typed error. **Do not panic.** Version 2: skip. |
+| Hook | After `FastCheck` in [`Tx.page`](tx.go): if v3 and the page is leaf/branch, recompute CRC over header + payload. Skip meta and freelist. |
 | Cache | Per-Tx `map[Pgid]struct{}` of verified pages so `seek` does not rehash the root on every Get. |
-| `Get` | Signature unchanged. On rot: return `nil` and set `tx.err` (same as a miss unless the caller checks `Tx.Err()`). |
-| `GetWithError` | `([]byte, error)`: miss → `nil, nil`; rot → `nil, ErrPageChecksum` (include pgid). |
+| `Get` | Signature unchanged. On rot: return `nil` and set `tx.err`. |
+| `GetWithError` | `([]byte, error)`: miss → `nil, nil`; rot → `nil, ErrPageChecksum`. |
 | Cursor | Keep `First` / `Next` / `Seek` signatures; add `Cursor.Err()`. |
 | Managed txs | [`View`](db.go) / [`Update`](db.go): if the closure returns nil but `tx.err != nil`, return `tx.err`. Add `Tx.Err()`. |
 
-**Done when:** flipping one byte in a committed leaf makes `GetWithError` fail; a normal `Get` of a good key still works; v2 behavior unchanged.
+**Done when:** flipping one byte in a committed leaf payload makes `GetWithError` fail; a normal `Get` of a good key still works; v2 behavior unchanged.
 
 **Files:** `tx.go`, `bucket.go`, `cursor.go`, `db.go`.
 
@@ -61,46 +64,59 @@ Cover unread pages and migration.
 
 | Item | Detail |
 |------|--------|
-| `Tx.Check` | For v3, CRC every reachable page (and overflow span). Report pgid. `StrictMode` after commit includes this. |
-| Compact | [`compact`](compact.go) / `bbolt compact` writes a **v3** file (recompute CRCs). v2 source still readable. |
-| CLI | `bbolt check` surfaces CRC errors. `bbolt page` / inspect prints `Checksum`. |
+| `Tx.Check` | For v3, CRC every reachable span. Report pgid. `StrictMode` after commit includes this. |
+| Compact | [`compact`](compact.go) / `bbolt compact` writes a **v3** file (recompute CRCs). v2 source still readable. This is the v2→v3 upgrade (no in-place header rewrite). |
+| CLI | `bbolt check` surfaces CRC errors. |
 
 **Done when:** `Check` finds rot on a page never `Get`’d; compact of a v2 fixture produces a v3 file that verifies.
 
-**Files:** `tx_check.go`, `compact.go`, `cmd/bbolt/command/command_check.go`, page inspect commands.
+**Files:** `tx_check.go`, `compact.go`, `cmd/bbolt/command/command_check.go`.
 
 ---
 
 ## Then: tests
 
-Run after Stage 3 (add tests incrementally per stage so each stage stays green).
-
 **Stage 1 tests**
 
-- CRC of a synthetic page; checksum field excluded from the hash; overflow span.
-- `DB.init` / first commit: every page type has a valid CRC.
+- CRC of a synthetic span; last 4 bytes excluded from the hash; header and payload included; overflow span.
+- Packed page that needs extra overflow so the CRC does not overlap payload.
+- `DB.init` / first commit: every page type has a valid trailing CRC.
 
 **Stage 2 tests**
 
-- Flip a byte in a leaf: `GetWithError` → `ErrPageChecksum`; `Get` → nil and `Tx.Err()` set.
-- Flip a byte in a branch (including a child pgid): lookup that walks that page fails.
+- Flip a byte in a leaf payload: `GetWithError` → `ErrPageChecksum`; `Get` → nil and `Tx.Err()` set.
+- Flip a byte in a branch payload: lookup that walks that page fails.
 - Missing key still `nil, nil` from `GetWithError`.
 - `View` returns `ErrPageChecksum` if the closure used `Get` on a rotten page and returned nil.
 - Open a v2 file: no page CRC checks; reads succeed.
 
 **Stage 3 tests**
 
-- Rotten unread page: `Get` of another key succeeds; `Check` reports the rotten pgid.
-- Compact v2 → v3; then corruption on the v3 file is detected.
-- Document (do not test as a failure): a **swapped valid page** is not detected (Approach A gap in ANALYSIS.md).
+- Two keys in different leaves; corrupt L1. `Get(keyOnL2)` succeeds; `Get(keyOnL1)` → `ErrPageChecksum`; `Check` reports L1 even if it was never `Get`’d.
+- Compact v2 → v3; then flip a byte on the dest: `Get` / `Check` fail as in Stage 2.
+- Copy a CRC-valid leaf over another (do **not** treat as failure): `Get` / `Check` stay silent. Self-CRC does not bind a page to its pgid; Approach B would.
 
 **Commands:** `go test ./...` and targeted packages (`go test .`, `go test ./internal/common`, `go test ./cmd/bbolt/command`).
+
+## Test results
+
+Image: `ghcr.io/jagtapdeepak/linux-build-env:latest` (2026-08-14).
+
+```bash
+go test ./internal/common/ -count=1
+go test . -count=1 -timeout 20m -run 'TestChecksum|TestPagesForChecksum|TestPageChecksum|TestOpen|TestDB_Get|TestDB_Put|TestTx_Check|TestBucket_Stats'
+```
+
+| Result | Tests |
+|--------|--------|
+| Pass | `./internal/common`; `TestPageChecksum_*`; `TestTx_Check_*`; `TestBucket_Stats*` (RandomFill counts updated for the 4-byte CRC trailer) |
+| Notes | `View` after `Check` on a rotten leaf returns `ErrPageChecksum` (`Tx.page` sets `tx.err`). |
 
 ---
 
 ## Then: performance analysis
 
-Compare **this branch vs main** (or vs a build with verification stubbed off) after tests pass. Record numbers in this file or a short subsection of ANALYSIS.md.
+Compare **this branch vs main** after tests pass.
 
 **Microbenchmarks** (in-process, warm mmap)
 
@@ -111,28 +127,18 @@ Compare **this branch vs main** (or vs a build with verification stubbed off) af
 | `BenchmarkCursorNext` | Sequential scan of N keys (Tx cache should keep this close to baseline) |
 | `BenchmarkCursorSeek` | Repeated `Seek` (cache hit on internal nodes) |
 | `BenchmarkUpdatePut` | Single `Put` + `Commit` (CRC vs two `fdatasync`s) |
-| `BenchmarkCheck` | `Tx.Check` on a DB of known size (e.g. 100MiB / 1GiB if practical) |
-
-Put benches in `db_test.go` or `checksum_bench_test.go`. Run:
+| `BenchmarkCheck` | `Tx.Check` on a DB of known size |
 
 ```bash
 go test -bench='BenchmarkGet|BenchmarkCursor|BenchmarkUpdatePut|BenchmarkCheck' -benchmem -count=5 .
 ```
 
-**What to report**
-
-- ns/op and Δ% vs baseline for Get, Cursor.Next, Put+Commit, Check.
-- Confirm Cursor.Next regression stays small **with** the per-Tx cache (if it does not, the cache is broken).
-- Optional: `cmd/bbolt bench` for a coarser end-to-end number.
-
 **Expectations** (from ANALYSIS.md; validate, do not assume)
 
-- Warm Get: a few µs extra (CRC × height); visible in microbenches.
+- Warm Get: extra CRC × height; visible in microbenches.
 - Cursor.Next with cache: near baseline.
-- Commit: noise vs `fdatasync`.
+- Commit: noise vs `fdatasync` (no sidecar write).
 - Check: extra CPU ≈ size / CRC throughput, often still I/O-bound.
-
-If Get regression is large, profile `Tx.page` / CRC and consider CRC-32C later — that is a follow-up, not Stage 1–3.
 
 ---
 

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 	"go.etcd.io/bbolt/internal/btesting"
 	"go.etcd.io/bbolt/internal/common"
 	"go.etcd.io/bbolt/internal/guts_cli"
@@ -29,6 +30,9 @@ func TestTx_Check_CorruptPage(t *testing.T) {
 
 	t.Log("Corrupting a random leaf page.")
 	victimPageId, validPageIds := corruptRandomLeafPageInBucket(t, db.DB, bucketName)
+
+	// Close before cleanup so MustCheck does not run on the corrupted file.
+	defer db.MustClose()
 
 	t.Log("Running consistency check.")
 	vErr := db.View(func(tx *bbolt.Tx) error {
@@ -52,12 +56,9 @@ func TestTx_Check_CorruptPage(t *testing.T) {
 		}
 		return nil
 	})
-	require.NoError(t, vErr)
+	// Check loads the victim through Tx.page, which sets tx.err on CRC mismatch.
+	require.ErrorIs(t, vErr, berrors.ErrPageChecksum)
 	t.Log("All check passed")
-
-	// Manually close the db, otherwise the PostTestCleanup will
-	// check the db again and accordingly fail the test.
-	db.MustClose()
 }
 
 func TestTx_Check_WithNestBucket(t *testing.T) {

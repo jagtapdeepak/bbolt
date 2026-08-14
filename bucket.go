@@ -432,6 +432,9 @@ func (b *Bucket) recursivelyInspect(name []byte) BucketStructure {
 // The returned memory is owned by bbolt and must never be modified; writing to this memory might corrupt the database.
 func (b *Bucket) Get(key []byte) []byte {
 	k, v, flags := b.Cursor().seek(key)
+	if b.tx.err != nil {
+		return nil
+	}
 
 	// Return nil if this is a bucket.
 	if (flags & common.BucketLeafFlag) != 0 {
